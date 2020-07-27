@@ -81,7 +81,7 @@ class MetaData(object):
             if key in self.columns:
                 setattr(row, key, val)
 
-        row.local_filename = os.path.join('.', os.path.relpath(local_file))
+        row.local_filename = local_file
 
         self.rows.append(row)
 

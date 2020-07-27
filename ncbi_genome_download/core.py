@@ -193,8 +193,8 @@ def config_download(config):
         mtable = metadata.get()
         if config.parallel == 1:
             for entry, group in download_candidates:
-                curr_jobs = create_downloadjob(entry, group, config)
-                fill_metadata(curr_jobs, entry, mtable)
+                curr_jobs, local_files = create_downloadjob(entry, group, config)
+                fill_metadata(curr_jobs, entry, mtable, local_files)
                 download_jobs.extend(curr_jobs)
 
             for dl_job in download_jobs:
@@ -203,10 +203,12 @@ def config_download(config):
             # Testing multiprocessing code is annoying
             pool = Pool(processes=config.parallel)
 
-            for index, created_dl_job in enumerate(pool.imap(downloadjob_creator_caller, [ (entry, group, config) for entry, group in download_candidates ])):
+            for index, dl_job_return in enumerate(pool.imap(downloadjob_creator_caller, [ (entry, group, config) for entry, group in download_candidates ])):
+                created_dl_job = dl_job_return[0]
+                local_files = dl_job_return[1]
                 download_jobs.extend(created_dl_job)
                 # index is conserved from download_candidates with the use of imap
-                fill_metadata(created_dl_job, download_candidates[index][0], mtable)
+                fill_metadata(created_dl_job, download_candidates[index][0], mtable, local_files)
 
             jobs = pool.map_async(worker, download_jobs)
             try:
@@ -229,7 +231,7 @@ def config_download(config):
     return 0
 
 
-def fill_metadata(jobs, entry, mtable):
+def fill_metadata(jobs, entry, mtable, local_files):
     """Fill the metadata table with the info on the downloaded files.
 
     Parameters
@@ -245,9 +247,11 @@ def fill_metadata(jobs, entry, mtable):
     -------
     None
     """
-    for job in jobs:
-        if job.full_url is not None:#if it is None, it's a symlink making, so nothing to write
-            mtable.add(entry, job.local_file)
+    for local_file in local_files:
+        mtable.add(entry, local_file)
+    #for job in jobs:
+    #    if job.full_url is not None:#if it is None, it's a symlink making, so nothing to write
+    #        mtable.add(entry, job.local_file)
 
 
 def select_candidates(config):
@@ -393,7 +397,6 @@ def create_downloadjob(entry, domain, config):
     logger = logging.getLogger("ncbi-genome-download")
     logger.info('Checking record %r', entry['assembly_accession'])
     full_output_dir = create_dir(entry, config.section, domain, config.output, config.flat_output)
-
     symlink_path = None
     if config.human_readable:
         symlink_path = create_readable_dir(entry, config.section, domain, config.output)
@@ -406,20 +409,24 @@ def create_downloadjob(entry, domain, config):
             handle.write(checksums)
 
     parsed_checksums = parse_checksums(checksums)
-
     download_jobs = []
+    local_files = []
     for fmt in config.file_format:
         try:
             if has_file_changed(full_output_dir, parsed_checksums, fmt):
-                download_jobs.append(
-                    download_file_job(entry, full_output_dir, parsed_checksums, fmt, symlink_path))
+                job = download_file_job(entry, full_output_dir, parsed_checksums, fmt, symlink_path)
+                local_files.append(job.local_file)
+                download_jobs.append(job)
             elif need_to_create_symlink(full_output_dir, parsed_checksums, fmt, symlink_path):
-                download_jobs.append(
-                    create_symlink_job(full_output_dir, parsed_checksums, fmt, symlink_path))
+                job = create_symlink_job(full_output_dir, parsed_checksums, fmt, symlink_path)
+                local_files.append(job.local_file)
+                download_jobs.append(job)
+            else: #file already exists
+                local_files.append(get_local_file(full_output_dir, parsed_checksums, fmt))
         except ValueError as err:
             logger.error(err)
 
-    return download_jobs
+    return download_jobs, local_files
 
 
 def create_dir(entry, section, domain, output, flat_output):
@@ -435,8 +442,7 @@ def create_dir(entry, section, domain, output, flat_output):
             pass
         else:
             raise
-
-    return full_output_dir
+    return os.path.abspath(full_output_dir)
 
 
 def create_readable_dir(entry, section, domain, output):
@@ -574,6 +580,11 @@ def download_file_job(entry, directory, checksums, filetype='genbank', symlink_p
     return DownloadJob(full_url, local_file, expected_checksum, full_symlink)
 # pylint: enable=too-many-arguments,too-many-locals
 
+def get_local_file(directory, checksums, filetype='genbank', ):
+    pattern = NgdConfig.get_fileending(filetype)
+    filename, expected_checksum = get_name_and_checksum(checksums, pattern)
+    local_file = os.path.join(directory, filename)
+    return local_file
 
 def create_symlink_job(directory, checksums, filetype, symlink_path):
     """Create a symlink-creating DownloadJob for an already downloaded file."""
